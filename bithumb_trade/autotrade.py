@@ -292,9 +292,9 @@ def run_scheduler():
     init_db()
     print("=== Auto Trading Started (Gemini + MySQL) ===")
     
-    schedule.every().day.at("09:00").do(execute_trade)
-    schedule.every().day.at("15:00").do(execute_trade)
-    schedule.every().day.at("21:00").do(execute_trade)
+    schedule.every().day.at("22:00").do(execute_trade)
+    schedule.every().day.at("22:03").do(execute_trade)
+    schedule.every().day.at("22:06").do(execute_trade)
 
     while True:
         schedule.run_pending()
