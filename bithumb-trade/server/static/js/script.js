@@ -1,236 +1,180 @@
-// ===== mock server data (빗썸 서버 응답 가정) =====
-const mockServerData = {
-    krwBalance: 1200000,
-    btcHolding: 0.032,
-    btcPrice: 42350000,
-    isAutoTrading: false,
-    strategy: {
-        buyPercent: 5,
-        sellPercent: 10,
-        orderAmount: 300000
-    },
-    tradeHistory: [
-        {
-            time: "12:03:21",
-            type: "BUY",
-            price: 41900000,
-            amount: 300000,
-            status: "Completed"
-        }
-    ]
-};
+// ===== 1. 전역 변수 및 설정 =====
+const UPDATE_INTERVAL = 2000; // 2초마다 갱신
+let priceChart; // 차트 객체 저장 변수
 
-let lastTradePrice = mockServerData.btcPrice;
-
-let isRequesting = false;
-
-// ===== util =====
+// ===== 2. 유틸 함수 =====
 function formatKRW(value) {
-    return "₩" + value.toLocaleString();
+    if (value === undefined || value === null) return "₩0";
+    return "₩" + Number(value).toLocaleString();
 }
 
-// ===== render =====
-function renderDashboard(data) {
-    document.getElementById("krwBalance").innerText =
-        formatKRW(data.krwBalance);
+// ===== 3. 차트 관련 함수 (시각화) =====
+function initChart() {
+    const ctx = document.getElementById('priceChart').getContext('2d');
 
-    document.getElementById("btcHolding").innerText =
-        data.btcHolding + " BTC";
-
-    document.getElementById("btcPrice").innerText =
-        formatKRW(data.btcPrice);
-
-    const totalAsset =
-        data.krwBalance + data.btcHolding * data.btcPrice;
-
-    document.getElementById("totalAsset").innerText =
-        formatKRW(Math.floor(totalAsset));
-
-    const statusText = document.getElementById("autoStatusText");
-    statusText.innerText = data.isAutoTrading
-        ? "Auto Trading ON"
-        : "Auto Trading OFF";
-    statusText.style.color = data.isAutoTrading ? "green" : "red";
-
-    document.getElementById("autoToggle").checked =
-        data.isAutoTrading;
-
-    renderTradeHistory(data.tradeHistory);
-}
-
-function renderTradeHistory(history) {
-    const tbody = document.getElementById("tradeTableBody");
-    tbody.innerHTML = ""; // 초기화는 괜찮습니다.
-
-    history.forEach((trade) => {
-        const row = document.createElement("tr");
-
-        // 안전하게 텍스트만 넣는 헬퍼 함수
-        const addCell = (text) => {
-            const td = document.createElement("td");
-            td.textContent = text; // ✨ 핵심: HTML 태그가 있어도 텍스트로만 처리됨
-            row.appendChild(td);
-        };
-
-        addCell(trade.time);
-        addCell(trade.type);
-        addCell(formatKRW(trade.price));
-        addCell(formatKRW(trade.amount));
-        addCell(trade.status);
-
-        tbody.appendChild(row);
+    priceChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [{
+                label: 'BTC Price',
+                data: [],
+                borderColor: '#2563eb',
+                backgroundColor: 'rgba(37, 99, 235, 0.1)',
+                borderWidth: 2,
+                tension: 0.4,
+                pointRadius: 0
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: { display: false },
+                y: { position: 'right' }
+            },
+            animation: false
+        }
     });
 }
 
+function updateChart(price) {
+    if (!priceChart) return;
 
-// ===== Auto Trading Toggle =====
-const autoToggle = document.getElementById("autoToggle");
+    const now = new Date().toLocaleTimeString();
 
-autoToggle.addEventListener("change", function () {
-    if (isRequesting) {
-        autoToggle.checked = mockServerData.isAutoTrading;
-        return;
+    priceChart.data.labels.push(now);
+    priceChart.data.datasets[0].data.push(price);
+
+    // 데이터 30개 유지 (메모리 관리)
+    if (priceChart.data.labels.length > 30) {
+        priceChart.data.labels.shift();
+        priceChart.data.datasets[0].data.shift();
     }
 
-    isRequesting = true;
-    autoToggle.disabled = true;
+    priceChart.update();
+}
 
-    setTimeout(() => {
-        mockServerData.isAutoTrading = autoToggle.checked;
-        renderDashboard(mockServerData);
+// ===== 4. API 데이터 연동 (Async/Await) =====
 
-        autoToggle.disabled = false;
-        isRequesting = false;
-    }, 800);
-});
+// (1) 자산 및 가격 정보 조회
+async function fetchBalance() {
+    try {
+        // 친구 서버 주소 (로컬 개발 환경 가정)
+        // 만약 서버 주소가 다르면 '/api/balance' 앞에 주소를 붙여야 함 (예: 'http://localhost:5000/api/balance')
+        const response = await fetch('/api/balance');
 
-// ===== Save Strategy =====
-const saveBtn = document.querySelector(".save-btn");
+        if (!response.ok) throw new Error("서버 응답 오류");
 
-saveBtn.addEventListener("click", function () {
-    if (isRequesting) return;
+        const data = await response.json();
 
+        if (data) {
+            // 텍스트 업데이트
+            document.getElementById("krwBalance").innerText = formatKRW(data.krw_balance);
+            document.getElementById("btcHolding").innerText = data.btc_balance + " BTC";
+            document.getElementById("btcPrice").innerText = formatKRW(data.btc_price);
+            document.getElementById("totalAsset").innerText = formatKRW(data.total_assets);
+
+            // ✨ 핵심: 서버에서 받은 실제 가격으로 차트 업데이트
+            updateChart(data.btc_price);
+        }
+    } catch (error) {
+        console.error("자산 정보 로딩 실패:", error);
+        // 실제 배포 시에는 사용자에게 조용히 실패를 알리거나 재시도 로직 필요
+    }
+}
+
+// (2) 거래 기록 조회 (보안 적용됨)
+async function fetchTrades() {
+    try {
+        const response = await fetch('/api/trades');
+        if (!response.ok) throw new Error("서버 응답 오류");
+
+        const trades = await response.json();
+        const tbody = document.getElementById("tradeTableBody");
+
+        tbody.innerHTML = ""; // 초기화
+
+        if (!trades || trades.length === 0) {
+            tbody.innerHTML = "<tr><td colspan='5'>거래 기록이 없습니다.</td></tr>";
+            return;
+        }
+
+        trades.forEach((trade) => {
+            const row = document.createElement("tr");
+
+            // 날짜 포맷팅
+            let timeStr = "-";
+            if (trade.created_at) {
+                const dateObj = new Date(trade.created_at);
+                timeStr = `${dateObj.getMonth() + 1}/${dateObj.getDate()} ${dateObj.getHours()}:${dateObj.getMinutes()}`;
+            }
+
+            // 헬퍼 함수: 텍스트 노드로 안전하게 삽입 (XSS 방어)
+            const addCell = (text, color = null, bold = false) => {
+                const td = document.createElement("td");
+                td.textContent = text;
+                if (color) td.style.color = color;
+                if (bold) td.style.fontWeight = "bold";
+                row.appendChild(td);
+            };
+
+            addCell(timeStr);
+
+            // 매수/매도 색상 처리
+            const typeText = trade.side ? trade.side.toUpperCase() : "-";
+            const typeColor = trade.side === 'buy' ? '#ef4444' : '#3b82f6'; // 빨강/파랑
+            addCell(typeText, typeColor, true);
+
+            addCell(formatKRW(trade.price));
+            addCell(trade.amount); // 수량
+            addCell(trade.reason || '조건 부합'); // 상태/이유
+
+            tbody.appendChild(row);
+        });
+
+    } catch (error) {
+        console.error("매매 기록 로딩 실패:", error);
+    }
+}
+
+// ===== 5. 버튼 이벤트 핸들러 (입력값 검증 + 알림) =====
+
+// (1) 전략 저장 버튼
+document.querySelector(".save-btn").addEventListener("click", function () {
+    // 1차: 클라이언트 측 유효성 검사 (잘못된 입력 방지)
     const buyPercent = Number(document.getElementById("buyPercent").value);
     const sellPercent = Number(document.getElementById("sellPercent").value);
-    const orderAmount = Number(document.getElementById("orderAmount").value);
-
-    if (isNaN(buyPercent) || buyPercent <= 0 || buyPercent > 20) {
-        alert("Buy condition must be between 1 and 20%");
-        return;
-    }
-
-    if (isNaN(sellPercent) || sellPercent <= buyPercent || sellPercent > 30) {
-        alert("Sell condition must be greater than buy condition and <= 30%");
-        return;
-    }
 
     if (sellPercent <= buyPercent) {
-        alert("위험 : 매도 조건(%)이 매수 조건보다 낮거나 같습니다. 손실이 발생할 수 있습니다.");
+        alert("⚠️ 위험: 매도 조건(%)이 매수 조건보다 낮거나 같습니다. 손실이 발생할 수 있습니다.");
         return;
     }
 
-    if (
-        isNaN(orderAmount) ||
-        orderAmount < 10000 ||
-        orderAmount > mockServerData.krwBalance
-    ) {
-        alert("Invalid order amount");
-        return;
-    }
-
-    isRequesting = true;
-    saveBtn.disabled = true;
-    saveBtn.innerText = "Saving...";
-
-    setTimeout(() => {
-        mockServerData.strategy = {
-            buyPercent,
-            sellPercent,
-            orderAmount
-        };
-
-        saveBtn.disabled = false;
-        saveBtn.innerText = "Save Strategy";
-        isRequesting = false;
-
-        alert("Strategy saved successfully");
-    }, 800);
+    // 2차: 서버 전송 (현재 미구현 상태 알림)
+    alert("현재 전략 저장 기능은 서버와 연동되지 않았습니다.\n(서버의 autotrade.py 설정이 우선 적용됩니다.)");
 });
 
-// ===== Init =====
+// (2) 자동매매 스위치
+const autoToggle = document.getElementById("autoToggle");
+autoToggle.addEventListener("change", function (e) {
+    alert("웹 제어 기능 준비 중: 터미널에서 봇을 직접 실행해주세요.");
+    // 스위치 강제 복구 (UI만 켜지는 것 방지)
+    e.target.checked = !e.target.checked;
+});
+
+// ===== 6. 초기화 =====
 document.addEventListener("DOMContentLoaded", function () {
-    renderDashboard(mockServerData);
+    console.log("Dashboard Started.");
 
-    document.getElementById("buyPercent").value =
-        mockServerData.strategy.buyPercent;
-    document.getElementById("sellPercent").value =
-        mockServerData.strategy.sellPercent;
-    document.getElementById("orderAmount").value =
-        mockServerData.strategy.orderAmount;
+    initChart();     // 차트 생성
+    fetchBalance();  // 데이터 1회 요청
+    fetchTrades();   // 기록 1회 요청
+
+    // 주기적 데이터 갱신 (Polling)
+    setInterval(() => {
+        fetchBalance();
+        fetchTrades();
+    }, UPDATE_INTERVAL);
 });
-
-function simulatePriceChange() {
-    const changeRate = (Math.random() * 2 - 1) * 0.003; // -0.3% ~ +0.3%
-    mockServerData.btcPrice = Math.floor(
-        mockServerData.btcPrice * (1 + changeRate)
-    );
-}
-
-function checkAutoTrading() {
-    if (!mockServerData.isAutoTrading) return;
-
-    const price = mockServerData.btcPrice;
-    const strategy = mockServerData.strategy;
-
-    // BUY 조건
-    if (
-        price <= lastTradePrice * (1 - strategy.buyPercent / 100) &&
-        mockServerData.krwBalance >= strategy.orderAmount
-    ) {
-        executeTrade("BUY", price);
-    }
-
-    // SELL 조건
-    if (
-        price >= lastTradePrice * (1 + strategy.sellPercent / 100) &&
-        mockServerData.btcHolding > 0
-    ) {
-        executeTrade("SELL", price);
-    }
-}
-
-function executeTrade(type, price) {
-    const amountKRW = mockServerData.strategy.orderAmount;
-    const btcAmount = amountKRW / price;
-
-    if (type === "BUY") {
-        mockServerData.krwBalance -= amountKRW;
-        mockServerData.btcHolding += btcAmount;
-    }
-
-    if (type === "SELL") {
-        mockServerData.krwBalance += amountKRW;
-        mockServerData.btcHolding -= btcAmount;
-    }
-
-    lastTradePrice = price;
-
-    mockServerData.tradeHistory.unshift({
-        time: new Date().toLocaleTimeString(),
-        type,
-        price,
-        amount: amountKRW,
-        status: "Completed"
-    });
-
-    // 로그 최대 10개 유지
-    if (mockServerData.tradeHistory.length > 10) {
-        mockServerData.tradeHistory.pop();
-    }
-}
-
-setInterval(() => {
-    simulatePriceChange();
-    checkAutoTrading();
-    renderDashboard(mockServerData);
-}, 2000);
