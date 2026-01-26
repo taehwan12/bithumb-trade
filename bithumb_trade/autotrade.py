@@ -5,8 +5,8 @@ import pymysql # sqlite3 대신 pymysql 사용
 from datetime import datetime
 from dotenv import load_dotenv
 import pybithumb
-import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
+from google import genai
+from google.genai.types import HarmCategory, HarmBlockThreshold
 import time
 import schedule
 
