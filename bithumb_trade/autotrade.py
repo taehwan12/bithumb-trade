@@ -1,44 +1,153 @@
 import os
 import json
+import time
 import requests
-import pymysql # sqlite3 대신 pymysql 사용
+import pymysql
+import jwt  # pip install pyjwt
+import uuid
+import hashlib
+import schedule
+from urllib.parse import urlencode
+import google.generativeai as genai
 from datetime import datetime
 from dotenv import load_dotenv
-import pybithumb
-from google import genai
-from google.genai.types import HarmCategory, HarmBlockThreshold
-import time
-import schedule
 
-# ===============================
-# 환경 변수 로드
-# ===============================
+
 load_dotenv()
 
+ACCESS_KEY = os.getenv("BITHUMB_ACCESS_KEY")
+SECRET_KEY = os.getenv("BITHUMB_SECRET_KEY")
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Gemini 설정
+DB_HOST = os.getenv("DB_HOST")
+DB_USER = os.getenv("DB_USER")
+DB_PASS = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
+
 genai.configure(api_key=GEMINI_API_KEY)
 
-# ===============================
-# DB 관련 함수 (MySQL 적용)
-# ===============================
+
+class BithumbV2:
+    def __init__(self, access_key, secret_key):
+        self.access_key = access_key
+        self.secret_key = secret_key
+        self.api_url = "https://api.bithumb.com/v1"
+
+    def _get_header(self, query_params=None):
+        payload = {
+            "access_key": self.access_key,
+            "nonce": str(uuid.uuid4()),
+            "timestamp": int(time.time() * 1000)
+        }
+       
+        if query_params:
+            query_string = urlencode(query_params)
+            m = hashlib.sha512()
+            m.update(query_string.encode('utf-8'))
+            query_hash = m.hexdigest()
+            
+            payload['query_hash'] = query_hash
+            payload['query_hash_alg'] = 'SHA512'
+
+        jwt_token = jwt.encode(payload, self.secret_key, algorithm="HS256")
+        return {
+            "Authorization": f"Bearer {jwt_token}",
+            "Content-Type": "application/json"
+        }
+
+    def get_balance(self):
+        try:
+            res = requests.get(f"{self.api_url}/accounts", headers=self._get_header())
+            res.raise_for_status()
+            data = res.json()
+            krw, btc = 0, 0
+            for wallet in data:
+                if wallet['currency'] == 'KRW':
+                    krw = float(wallet['balance'])
+                elif wallet['currency'] == 'BTC':
+                    btc = float(wallet['balance'])
+            return krw, btc
+        except Exception as e:
+            print(f"❌ 잔고 조회 실패: {e}")
+            return 0, 0
+
+    def get_current_price(self, market="KRW-BTC"):
+        try:
+            url = f"{self.api_url}/ticker?markets={market}"
+            res = requests.get(url)
+            data = res.json()
+            return float(data[0]['trade_price'])
+        except:
+            return 0
+
+    def get_ohlcv(self, market="KRW-BTC", unit="minutes/60", count=24):
+        try:
+            if unit == "days":
+                url = f"{self.api_url}/candles/days?market={market}&count={count}"
+            else:
+                url = f"{self.api_url}/candles/{unit}?market={market}&count={count}"
+            
+            res = requests.get(url)
+            data = res.json()
+            
+            formatted_data = []
+            for d in data:
+                formatted_data.append({
+                    "time": d['candle_date_time_kst'],
+                    "open": d['opening_price'],
+                    "high": d['high_price'],
+                    "low": d['low_price'],
+                    "close": d['trade_price'],
+                    "volume": d['candle_acc_trade_volume']
+                })
+            # 과거순 정렬
+            return formatted_data[::-1]
+        except Exception as e:
+            print(f"차트 데이터 오류: {e}")
+            return []
+
+    def buy_market(self, market="KRW-BTC", price_krw=5000):
+
+        params = {
+            "market": market,
+            "side": "bid",
+            "ord_type": "price",
+            "price": str(price_krw) # 문자열 변환 중요
+        }
+
+        headers = self._get_header(params)
+        try:
+            res = requests.post(f"{self.api_url}/orders", json=params, headers=headers)
+            return res.json()
+        except Exception as e:
+            return {"error": str(e)}
+
+    def sell_market(self, market="KRW-BTC", volume_btc=0.0001):
+        params = {
+            "market": market,
+            "side": "ask",
+            "ord_type": "market",
+            "volume": str(volume_btc)
+        }
+        headers = self._get_header(params)
+        try:
+            res = requests.post(f"{self.api_url}/orders", json=params, headers=headers)
+            return res.json()
+        except Exception as e:
+            return {"error": str(e)}
+
+
 def get_db_connection():
     return pymysql.connect(
-        host=os.getenv("DB_HOST"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        db=os.getenv("DB_NAME"),
-        charset='utf8mb4',
-        cursorclass=pymysql.cursors.DictCursor # 데이터를 딕셔너리로 받기 위해 설정
+        host=DB_HOST, user=DB_USER, password=DB_PASS, db=DB_NAME,
+        charset='utf8mb4', cursorclass=pymysql.cursors.DictCursor
     )
 
 def init_db():
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
-            # MySQL 문법에 맞게 AUTO_INCREMENT 사용
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
                     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -55,250 +164,155 @@ def init_db():
     finally:
         conn.close()
 
-def log_trade(decision, percentage, reason, btc_balance, krw_balance, btc_price):
+def log_trade(decision, percentage, reason, btc, krw, price):
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
-            # pymysql에서는 placeholder가 '?'가 아니라 '%s' 입니다.
-            sql = """
-                INSERT INTO trades 
-                (timestamp, decision, percentage, reason, btc_balance, krw_balance, btc_price)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """
-            cursor.execute(sql, (
-                datetime.now().isoformat(),
-                decision,
-                percentage,
-                reason,
-                btc_balance,
-                krw_balance,
-                btc_price
-            ))
+            sql = "INSERT INTO trades (timestamp, decision, percentage, reason, btc_balance, krw_balance, btc_price) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+            cursor.execute(sql, (datetime.now().isoformat(), decision, percentage, reason, btc, krw, price))
         conn.commit()
     except Exception as e:
         print(f"DB Log Error: {e}")
     finally:
         conn.close()
 
-def get_recent_trades(limit=5):
+def get_recent_trades():
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
-            sql = """
-                SELECT timestamp, decision, percentage, reason, btc_balance, krw_balance, btc_price
-                FROM trades
-                ORDER BY timestamp DESC
-                LIMIT %s
-            """
-            cursor.execute(sql, (limit,))
-            result = cursor.fetchall() # DictCursor 덕분에 딕셔너리 리스트로 반환됨
-            return result
-    except Exception as e:
-        print(f"DB Fetch Error: {e}")
+            cursor.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 5")
+            return cursor.fetchall()
+    except:
         return []
     finally:
         conn.close()
 
-# ===============================
-# 뉴스 수집
-# ===============================
-def get_bitcoin_news(api_key, query="bitcoin", num_results=5):
-    if not api_key:
-        return []
-
-    url = "https://serpapi.com/search.json"
-    params = {
-        "engine": "google_news",
-        "q": query,
-        "api_key": api_key
-    }
-
+# ==========================================
+# 4. 뉴스 및 AI (모델명 수정됨)
+# ==========================================
+def get_bitcoin_news():
+    if not SERPAPI_API_KEY: return []
     try:
-        r = requests.get(url, params=params)
-        r.raise_for_status()
-        data = r.json()
-
-        news = []
-        for item in data.get("news_results", [])[:num_results]:
-            news.append({
-                "title": item.get("title"),
-                "date": item.get("date")
-            })
-        return news
-    except Exception as e:
-        print(f"News Error: {e}")
+        url = "https://serpapi.com/search.json"
+        params = {"engine": "google_news", "q": "bitcoin", "api_key": SERPAPI_API_KEY}
+        r = requests.get(url, params=params).json()
+        return [{"title": i.get("title"), "date": i.get("date")} for i in r.get("news_results", [])[:5]]
+    except:
         return []
 
-# ===============================
-# AI 판단 (Gemini)
-# ===============================
 def ai_trading():
-    # 1. 차트 데이터
-    try:
-        short_df = pybithumb.get_ohlcv("KRW-BTC", interval="minute60", count=24)
-        mid_df = pybithumb.get_ohlcv("KRW-BTC", interval="minute240", count=30)
-        long_df = pybithumb.get_ohlcv("KRW-BTC", interval="day", count=30)
-    except Exception as e:
-        print(f"Chart Data Error: {e}")
-        return {"decision": "hold", "percentage": 0, "reason": "Chart data fetch failed"}
-
-    # 2. 뉴스
-    news = get_bitcoin_news(SERPAPI_API_KEY)
-
-    # 3. 빗썸 잔고 조회
-    bithumb = pybithumb.Bithumb(
-        os.getenv("BITHUMB_ACCESS_KEY"),
-        os.getenv("BITHUMB_SECRET_KEY")
-    )
+    print(f"\n[{datetime.now()}] 🤖 AI Trading System Start...")
     
-    balance = bithumb.get_balance("BTC") 
-    current_btc = balance[0]
-    current_krw = balance[2]
-    current_price = pybithumb.get_current_price("KRW-BTC")
+    bithumb = BithumbV2(ACCESS_KEY, SECRET_KEY)
+    current_krw, current_btc = bithumb.get_balance()
+    current_price = bithumb.get_current_price()
+    
 
+    short_term = bithumb.get_ohlcv("KRW-BTC", "minutes/60", 24)
+    mid_term = bithumb.get_ohlcv("KRW-BTC", "minutes/240", 30)
+    long_term = bithumb.get_ohlcv("KRW-BTC", "days", 30)
+    
+    news = get_bitcoin_news()
     recent_trades = get_recent_trades()
 
-    # 데이터 페이로드 구성
     data_payload = {
-        "short_term": json.loads(short_df.to_json()) if short_df is not None else None,
-        "mid_term": json.loads(mid_df.to_json()) if mid_df is not None else None,
-        "long_term": json.loads(long_df.to_json()) if long_df is not None else None,
+        "market_data": {
+            "current_price": current_price,
+            "short_term_chart": short_term, 
+            "mid_term_chart": mid_term,
+            "long_term_chart": long_term
+        },
         "news": news,
-        "balance": {
-            "krw": current_krw,
-            "btc": current_btc,
-            "btc_price": current_price,
-            "total_value": current_krw + (current_btc * current_price)
+        "account": {
+            "krw_balance": current_krw,
+            "btc_balance": current_btc,
+            "total_asset_krw": current_krw + (current_btc * current_price)
         },
         "recent_trades": recent_trades
     }
 
-    # Gemini 모델 설정
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        generation_config={
-            "temperature": 0.1,
-            "response_mime_type": "application/json"
-        },
-        safety_settings={
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        }
-    )
-
+    # ✅ 모델명 'gemini-flash-latest'로 고정
+    model = genai.GenerativeModel("gemini-flash-latest")
+    
     prompt = f"""
-    You are an expert Bitcoin trader using technical analysis and news sentiment.
-
-    Rules:
-    1. Goal: Maximize profit, minimize loss (Rule No.1: Never lose money).
-    2. Analyze the provided chart data, news, and recent trade history.
-    3. Output strictly in JSON format.
-
+    You are a professional Bitcoin trader. Analyze the market data and make a trading decision.
+    
+    Current State:
+    - KRW Balance: {current_krw:,.0f} KRW
+    - BTC Balance: {current_btc:.8f} BTC
+    - Current Price: {current_price:,.0f} KRW
+    
+    Goal: Maximize profit safely.
+    
     Data:
-    {json.dumps(data_payload)}
-
-    Response Format:
-    {{"decision": "buy" or "sell" or "hold", "percentage": (integer 1-100), "reason": "brief explanation"}}
+    {json.dumps(data_payload, ensure_ascii=False)}
+    
+    Response strictly in JSON:
+    {{"decision": "buy" or "sell" or "hold", "percentage": 1-100, "reason": "short explanation"}}
     """
 
     try:
         response = model.generate_content(prompt)
-        
-        response_text = response.text.strip()
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
-            
-        result = json.loads(response_text)
+        text = response.text.replace("```json", "").replace("```", "").strip()
+        result = json.loads(text)
     except Exception as e:
-        print(f"Gemini Error: {e}")
-        result = {"decision": "hold", "percentage": 0, "reason": "AI Error"}
+        print(f"⚠️ AI Error: {e}")
+        result = {"decision": "hold", "percentage": 0, "reason": "AI Failed"}
 
-    return result
-
-# ===============================
-# 매매 실행
-# ===============================
-def execute_trade():
-    # DB 테이블 존재 여부 확인 (최초 1회 안전장치)
-    init_db()
-    
-    print(f"\n[{datetime.now()}] Trading logic start")
-
-    result = ai_trading()
-    print(f"### AI Decision: {result.get('decision', 'hold').upper()} ( {result.get('percentage', 0)}% ) ###")
-    print(f"### Reason: {result.get('reason', 'None')} ###")
-
-    bithumb = pybithumb.Bithumb(
-        os.getenv("BITHUMB_ACCESS_KEY"),
-        os.getenv("BITHUMB_SECRET_KEY")
-    )
-    
-    balance = bithumb.get_balance("BTC")
-    current_btc = balance[0]
-    current_krw = balance[2]
-    current_price = pybithumb.get_current_price("KRW-BTC")
+    print(f"💡 AI Decision: {result['decision'].upper()} ({result['percentage']}%) - {result['reason']}")
 
     executed = False
+    
 
-    if result["decision"] == "buy":
-        amount = current_krw * (result["percentage"] / 100) * 0.997
-        if amount >= 5000:
-            try:
-                print(f"Trying to BUY: {amount:,.0f} KRW")
-                bithumb.buy_market_order("KRW-BTC", amount)
+    if result['decision'] == "buy":
+        buy_amount = current_krw * (result['percentage'] / 100) * 0.995
+        if buy_amount >= 5000:
+            print(f"💰 Buying {buy_amount:,.0f} KRW...")
+            order = bithumb.buy_market("KRW-BTC", buy_amount)
+            
+            if "uuid" in order:
+                print(f"✅ Buy Order Success (UUID: {order['uuid']})")
                 executed = True
-            except Exception as e:
-                print(f"Buy Error: {e}")
+            else:
+                print(f"❌ Buy Failed: {order}")
         else:
-            print("Buy skipped: Amount < 5000 KRW")
+            print("🚫 Skipped: Amount < 5000 KRW")
 
-    elif result["decision"] == "sell":
-        btc_amount = current_btc * (result["percentage"] / 100)
-        if (btc_amount * current_price) >= 5000:
-            try:
-                print(f"Trying to SELL: {btc_amount} BTC")
-                bithumb.sell_market_order("KRW-BTC", btc_amount)
+
+    elif result['decision'] == "sell":
+        sell_volume = current_btc * (result['percentage'] / 100)
+        if (sell_volume * current_price) >= 5000:
+            print(f"📉 Selling {sell_volume:.8f} BTC...")
+            order = bithumb.sell_market("KRW-BTC", sell_volume)
+            
+            if "uuid" in order:
+                print(f"✅ Sell Order Success (UUID: {order['uuid']})")
                 executed = True
-            except Exception as e:
-                print(f"Sell Error: {e}")
+            else:
+                print(f"❌ Sell Failed: {order}")
         else:
-            print("Sell skipped: Value < 5000 KRW")
+            print("🚫 Skipped: Value < 5000 KRW")
 
     time.sleep(1)
-
-    new_balance = bithumb.get_balance("BTC")
-    
-    # MySQL에 로그 저장
+    new_krw, new_btc = bithumb.get_balance()
     log_trade(
-        result["decision"],
-        result["percentage"] if executed else 0,
-        result["reason"],
-        new_balance[0], 
-        new_balance[2], 
-        pybithumb.get_current_price("KRW-BTC")
+        result['decision'], 
+        result['percentage'] if executed else 0, 
+        result['reason'], 
+        new_btc, new_krw, current_price
     )
-
-    print(f"[{datetime.now()}] Trading cycle completed\n")
-
-# ===============================
-# 스케줄러
-# ===============================
-def run_scheduler():
-    # 시작 전 DB 연결 테스트 및 테이블 생성
-    init_db()
-    print("=== Auto Trading Started (Gemini + MySQL) ===")
-    
-    schedule.every().day.at("22:00").do(execute_trade)
-    schedule.every().day.at("22:03").do(execute_trade)
-    schedule.every().day.at("22:06").do(execute_trade)
-
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+    print("---------------------------------------------------")
 
 if __name__ == "__main__":
-    run_scheduler()
+    init_db()
+    print("🚀 Auto Trading Bot Started (Bithumb v2 + Gemini)")
+    
+  
+    ai_trading()
+
+
+    schedule.every(1).hours.do(ai_trading)
+    
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
