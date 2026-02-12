@@ -10,7 +10,7 @@ function formatKRW(value) {
 
 // ===== 3. 차트 관련 함수 (시각화) =====
 function initChart() {
-    const ctx = document.getElementById('priceChart').getContext('2d');
+    const ctx = document.getElementById('btcChart').getContext('2d');
 
     priceChart = new Chart(ctx, {
         type: 'line',
