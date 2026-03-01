@@ -3,7 +3,7 @@ import json
 import time
 import requests
 import pymysql
-import jwt  # pip install pyjwt
+import jwt
 import uuid
 import hashlib
 import schedule
@@ -11,7 +11,6 @@ from urllib.parse import urlencode
 import google.generativeai as genai
 from datetime import datetime
 from dotenv import load_dotenv
-
 
 load_dotenv()
 
@@ -27,7 +26,6 @@ DB_NAME = os.getenv("DB_NAME")
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-
 class BithumbV2:
     def __init__(self, access_key, secret_key):
         self.access_key = access_key
@@ -40,13 +38,12 @@ class BithumbV2:
             "nonce": str(uuid.uuid4()),
             "timestamp": int(time.time() * 1000)
         }
-       
+
         if query_params:
             query_string = urlencode(query_params)
             m = hashlib.sha512()
             m.update(query_string.encode('utf-8'))
             query_hash = m.hexdigest()
-            
             payload['query_hash'] = query_hash
             payload['query_hash_alg'] = 'SHA512'
 
@@ -61,16 +58,20 @@ class BithumbV2:
             res = requests.get(f"{self.api_url}/accounts", headers=self._get_header())
             res.raise_for_status()
             data = res.json()
-            krw, btc = 0, 0
+
+            krw, btc = 0.0, 0.0
+
             for wallet in data:
-                if wallet['currency'] == 'KRW':
-                    krw = float(wallet['balance'])
-                elif wallet['currency'] == 'BTC':
-                    btc = float(wallet['balance'])
+                if wallet.get('currency') == 'KRW':
+                    krw = float(wallet.get('balance', 0))
+                elif wallet.get('currency') == 'BTC':
+                    btc = float(wallet.get('balance', 0))
+
             return krw, btc
+
         except Exception as e:
-            print(f"❌ 잔고 조회 실패: {e}")
-            return 0, 0
+            print(f"잔고 조회 실패: {e}")
+            return 0.0, 0.0
 
     def get_current_price(self, market="KRW-BTC"):
         try:
@@ -87,10 +88,10 @@ class BithumbV2:
                 url = f"{self.api_url}/candles/days?market={market}&count={count}"
             else:
                 url = f"{self.api_url}/candles/{unit}?market={market}&count={count}"
-            
+
             res = requests.get(url)
             data = res.json()
-            
+
             formatted_data = []
             for d in data:
                 formatted_data.append({
@@ -101,22 +102,23 @@ class BithumbV2:
                     "close": d['trade_price'],
                     "volume": d['candle_acc_trade_volume']
                 })
-            # 과거순 정렬
+
             return formatted_data[::-1]
+
         except Exception as e:
             print(f"차트 데이터 오류: {e}")
             return []
 
     def buy_market(self, market="KRW-BTC", price_krw=5000):
-
         params = {
             "market": market,
             "side": "bid",
             "ord_type": "price",
-            "price": str(price_krw) # 문자열 변환 중요
+            "price": str(price_krw)
         }
 
         headers = self._get_header(params)
+
         try:
             res = requests.post(f"{self.api_url}/orders", json=params, headers=headers)
             return res.json()
@@ -130,18 +132,23 @@ class BithumbV2:
             "ord_type": "market",
             "volume": str(volume_btc)
         }
+
         headers = self._get_header(params)
+
         try:
             res = requests.post(f"{self.api_url}/orders", json=params, headers=headers)
             return res.json()
         except Exception as e:
             return {"error": str(e)}
 
-
 def get_db_connection():
     return pymysql.connect(
-        host=DB_HOST, user=DB_USER, password=DB_PASS, db=DB_NAME,
-        charset='utf8mb4', cursorclass=pymysql.cursors.DictCursor
+        host=DB_HOST,
+        user=DB_USER,
+        password=DB_PASS,
+        db=DB_NAME,
+        charset='utf8mb4',
+        cursorclass=pymysql.cursors.DictCursor
     )
 
 def init_db():
@@ -168,8 +175,20 @@ def log_trade(decision, percentage, reason, btc, krw, price):
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
-            sql = "INSERT INTO trades (timestamp, decision, percentage, reason, btc_balance, krw_balance, btc_price) VALUES (%s, %s, %s, %s, %s, %s, %s)"
-            cursor.execute(sql, (datetime.now().isoformat(), decision, percentage, reason, btc, krw, price))
+            sql = """
+            INSERT INTO trades
+            (timestamp, decision, percentage, reason, btc_balance, krw_balance, btc_price)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """
+            cursor.execute(sql, (
+                datetime.now().isoformat(),
+                decision,
+                percentage,
+                reason,
+                btc,
+                krw,
+                price
+            ))
         conn.commit()
     except Exception as e:
         print(f"DB Log Error: {e}")
@@ -187,38 +206,42 @@ def get_recent_trades():
     finally:
         conn.close()
 
-# ==========================================
-# 4. 뉴스 및 AI (모델명 수정됨)
-# ==========================================
 def get_bitcoin_news():
-    if not SERPAPI_API_KEY: return []
+    if not SERPAPI_API_KEY:
+        return []
     try:
         url = "https://serpapi.com/search.json"
-        params = {"engine": "google_news", "q": "bitcoin", "api_key": SERPAPI_API_KEY}
+        params = {
+            "engine": "google_news",
+            "q": "bitcoin",
+            "api_key": SERPAPI_API_KEY
+        }
         r = requests.get(url, params=params).json()
-        return [{"title": i.get("title"), "date": i.get("date")} for i in r.get("news_results", [])[:5]]
+        return [
+            {"title": i.get("title"), "date": i.get("date")}
+            for i in r.get("news_results", [])[:5]
+        ]
     except:
         return []
 
 def ai_trading():
-    print(f"\n[{datetime.now()}] 🤖 AI Trading System Start...")
-    
+    print(f"\n[{datetime.now()}] AI Trading System Start...")
+
     bithumb = BithumbV2(ACCESS_KEY, SECRET_KEY)
     current_krw, current_btc = bithumb.get_balance()
     current_price = bithumb.get_current_price()
-    
 
     short_term = bithumb.get_ohlcv("KRW-BTC", "minutes/60", 24)
     mid_term = bithumb.get_ohlcv("KRW-BTC", "minutes/240", 30)
     long_term = bithumb.get_ohlcv("KRW-BTC", "days", 30)
-    
+
     news = get_bitcoin_news()
     recent_trades = get_recent_trades()
 
     data_payload = {
         "market_data": {
             "current_price": current_price,
-            "short_term_chart": short_term, 
+            "short_term_chart": short_term,
             "mid_term_chart": mid_term,
             "long_term_chart": long_term
         },
@@ -231,22 +254,21 @@ def ai_trading():
         "recent_trades": recent_trades
     }
 
-    # ✅ 모델명 'gemini-flash-latest'로 고정
     model = genai.GenerativeModel("gemini-flash-latest")
-    
+
     prompt = f"""
     You are a professional Bitcoin trader. Analyze the market data and make a trading decision.
-    
+
     Current State:
     - KRW Balance: {current_krw:,.0f} KRW
     - BTC Balance: {current_btc:.8f} BTC
     - Current Price: {current_price:,.0f} KRW
-    
+
     Goal: Maximize profit safely.
-    
+
     Data:
     {json.dumps(data_payload, ensure_ascii=False)}
-    
+
     Response strictly in JSON:
     {{"decision": "buy" or "sell" or "hold", "percentage": 1-100, "reason": "short explanation"}}
     """
@@ -256,63 +278,60 @@ def ai_trading():
         text = response.text.replace("```json", "").replace("```", "").strip()
         result = json.loads(text)
     except Exception as e:
-        print(f"⚠️ AI Error: {e}")
+        print(f"AI Error: {e}")
         result = {"decision": "hold", "percentage": 0, "reason": "AI Failed"}
 
-    print(f"💡 AI Decision: {result['decision'].upper()} ({result['percentage']}%) - {result['reason']}")
+    print(f"AI Decision: {result['decision'].upper()} ({result['percentage']}%) - {result['reason']}")
 
     executed = False
-    
 
     if result['decision'] == "buy":
         buy_amount = current_krw * (result['percentage'] / 100) * 0.995
         if buy_amount >= 5000:
-            print(f"💰 Buying {buy_amount:,.0f} KRW...")
+            print(f"Buying {buy_amount:,.0f} KRW...")
             order = bithumb.buy_market("KRW-BTC", buy_amount)
-            
             if "uuid" in order:
-                print(f"✅ Buy Order Success (UUID: {order['uuid']})")
+                print(f"Buy Order Success (UUID: {order['uuid']})")
                 executed = True
             else:
-                print(f"❌ Buy Failed: {order}")
+                print(f"Buy Failed: {order}")
         else:
-            print("🚫 Skipped: Amount < 5000 KRW")
-
+            print("Skipped: Amount < 5000 KRW")
 
     elif result['decision'] == "sell":
         sell_volume = current_btc * (result['percentage'] / 100)
         if (sell_volume * current_price) >= 5000:
-            print(f"📉 Selling {sell_volume:.8f} BTC...")
+            print(f"Selling {sell_volume:.8f} BTC...")
             order = bithumb.sell_market("KRW-BTC", sell_volume)
-            
             if "uuid" in order:
-                print(f"✅ Sell Order Success (UUID: {order['uuid']})")
+                print(f"Sell Order Success (UUID: {order['uuid']})")
                 executed = True
             else:
-                print(f"❌ Sell Failed: {order}")
+                print(f"Sell Failed: {order}")
         else:
-            print("🚫 Skipped: Value < 5000 KRW")
+            print("Skipped: Value < 5000 KRW")
 
     time.sleep(1)
+
     new_krw, new_btc = bithumb.get_balance()
+
     log_trade(
-        result['decision'], 
-        result['percentage'] if executed else 0, 
-        result['reason'], 
-        new_btc, new_krw, current_price
+        result['decision'],
+        result['percentage'] if executed else 0,
+        result['reason'],
+        new_btc,
+        new_krw,
+        current_price
     )
+
     print("---------------------------------------------------")
 
 if __name__ == "__main__":
     init_db()
-    print("🚀 Auto Trading Bot Started (Bithumb v2 + Gemini)")
-    
-  
+    print("Auto Trading Bot Started (Bithumb v2 + Gemini)")
     ai_trading()
-
-
     schedule.every(1).hours.do(ai_trading)
-    
+
     while True:
         schedule.run_pending()
         time.sleep(1)
